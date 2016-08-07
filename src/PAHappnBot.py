@@ -16,6 +16,8 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 """
 
+from PAHappnUser import PAHappnUser
+
 import json
 import os
 import requests
@@ -26,19 +28,20 @@ class PAHappnBot:
     def __init__(self):
         self.secrets = self._read_secrets_file()
         self.root_url = 'https://api.happn.fr/'
-        # Set a known user agent, otherwise the Happn API thinks you are a bot
-        # and refuses to cooperate.
-        self.headers = {'Content-Type': 'application/x-www-form-urlencoded',
-                        'User-Agent': 'Mozilla/5.0'}
-        self.oauth_token = self.get_oauth_token()
+        self.log_in()
 
     def run_happn_bot(self):
-        self.get_recommendations()
+        pass
 
-    def get_oauth_token(self):
+    def log_in(self):
         """Use the Facebook oAuth token to retrieve a Happn oAuth token"""
         url = '{root_url}connect/oauth/token/'.format(root_url=self.root_url)
-        headers = self.headers
+        # Set a known user agent, otherwise the Happn API thinks you are a bot
+        # and refuses to cooperate.
+        headers = {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'User-Agent': 'Mozilla/5.0'
+        }
         payload = {
             'client_id': self.secrets.get('CLIENT_ID'),
             'client_secret': self.secrets.get('CLIENT_SECRET'),
@@ -51,16 +54,43 @@ class PAHappnBot:
 
         if r.status_code == requests.codes.ok:
             response = json.loads(r.text)
-            user_id = response.get('user_id')
-            print("Logged in as Happn user with ID {}".format(user_id))
-            oauth_token = response.get('access_token')
-            return oauth_token
+            happn_id = response.get('user_id')
+            self.oauth_token = response.get('access_token')
+            self.me = self.get_happn_user(happn_id)
+
+            is_new = response.get('is_new')
+            if is_new:
+                welcome_message = 'Welcome'
+            else:
+                welcome_message = 'Welcome back'
+            print("Logged in as Happn user with ID {happn_id}.".format(happn_id=self.me.id))
+            print("{welcome_message}, {display_name}!".format(
+                welcome_message=welcome_message, display_name=self.me.display_name))
         else:
             msg = 'Obtaining oAuth token fails. Status code: {}'.format(r.status_code)
             raise ConnectionError(msg)
 
     def get_recommendations(self):
         pass
+
+    def get_happn_user(self, happn_id: str) -> PAHappnUser:
+        """Given a Happn user ID, return a Happn user object"""
+        url = '{root_url}api/users/{happn_id}/'.format(root_url=self.root_url, happn_id=happn_id)
+        headers = {
+            'Authorization': 'OAuth="{}"'.format(self.oauth_token),
+            'Content-Type': 'application/json',
+            'User-Agent': 'Happn/19.1.0 AndroidSDK/19'
+        }
+        r = requests.get(url, headers=headers)
+
+        if r.status_code == requests.codes.ok:
+            response = json.loads(r.text)
+            user_info_dict = response.get('data')
+            user = PAHappnUser(user_info_dict)
+            return user
+        else:
+            msg = 'Obtaining Happn user {} fails. Status code: {}'.format(happn_id, r.status_code)
+            raise ConnectionError(msg)
 
     def _read_secrets_file(self):
         secrets_file = self._get_secrets_file_name()
