@@ -16,4 +16,3 @@ class PAHappnUser:
         self.nickname = happn_user.get('nickname')
         self.gender = happn_user.get('gender')
         self.work = happn_user.get('workplace')
-

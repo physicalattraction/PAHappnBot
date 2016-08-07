@@ -28,6 +28,9 @@ class PAHappnBot:
     def __init__(self):
         self.secrets = self._read_secrets_file()
         self.root_url = 'https://api.happn.fr/'
+
+        self.oauth_token = None
+        self.me = None
         self.log_in()
 
     def run_happn_bot(self):
