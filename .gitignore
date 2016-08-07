@@ -61,8 +61,5 @@ target/
 #Ipython Notebook
 .ipynb_checkpoints
 
-# Image directory
-img/
-
 # IDE stuff
 .idea
