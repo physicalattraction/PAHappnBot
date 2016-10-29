@@ -178,7 +178,7 @@ class PAHappnBot:
             raise ConnectionError(msg)
 
     def analyze_liked_users(self):
-        fields_to_analyze = ['school', 'age']
+        fields_to_analyze = ['school', 'age', 'nb_times', 'display_name']
         for field in fields_to_analyze:
             field_count = {}
             for user in self.liked_users.values():
@@ -189,7 +189,7 @@ class PAHappnBot:
                     field_count[field_value] = 1
             print()
             print('** {} **'.format(field))
-            pprint(sorted(field_count.items(), key=operator.itemgetter(1)))
+            pprint(sorted(field_count.items(), key=operator.itemgetter(0)))
 
     def _read_secrets_file(self):
         secrets_file = self._get_secrets_file_name()
