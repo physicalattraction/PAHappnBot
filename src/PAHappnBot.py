@@ -15,6 +15,9 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 """
+import operator
+from collections import OrderedDict
+from pprint import pprint
 
 from PAHappnUser import PAHappnUser
 
@@ -24,17 +27,24 @@ import requests
 
 
 class PAHappnBot:
-
     def __init__(self):
         self.secrets = self._read_secrets_file()
+        self.liked_users = self._read_liked_users_file()
         self.root_url = 'https://api.happn.fr/'
+        self.headers = {
+            'Content-Type': 'application/json',
+            'User-Agent': 'Happn/19.1.0 AndroidSDK/19'
+        }
 
         self.oauth_token = None
         self.me = None
         self.log_in()
 
     def run_happn_bot(self):
-        pass
+        crossings = self.get_crossings(limit=250)
+        for happn_id, nb_times in crossings.items():
+            self.like_user(happn_id, nb_times)
+        print('Processed {} possible dates'.format(len(crossings)))
 
     def log_in(self):
         """Use the Facebook oAuth token to retrieve a Happn oAuth token"""
@@ -59,9 +69,10 @@ class PAHappnBot:
             response = json.loads(r.text)
             happn_id = response.get('user_id')
             self.oauth_token = response.get('access_token')
+            self.headers['Authorization'] = 'OAuth="{}"'.format(self.oauth_token)
             self.me = self.get_happn_user(happn_id)
 
-            is_new = response.get('is_new')
+            is_new = response.get('is_new', True)
             if is_new:
                 welcome_message = 'Welcome'
             else:
@@ -73,8 +84,78 @@ class PAHappnBot:
             msg = 'Obtaining oAuth token fails. Status code: {}'.format(r.status_code)
             raise ConnectionError(msg)
 
-    def get_recommendations(self):
-        pass
+    def get_crossings(self, limit=None) -> OrderedDict:
+        """
+        Return all crossings as a list of Happn ids
+        """
+        url = '{}/api/users/{}/crossings/'.format(self.root_url, self.me.id)
+
+        fields = ['nb_times', 'notifier']
+        params = {
+            'fields': ','.join(fields)
+        }
+
+        if limit:
+            params['limit'] = limit
+
+        response = requests.get(url, headers=self.headers, params=params)
+        if response.status_code != 200:
+            msg = 'ERROR. Failed to fetch crossings. Status code {}\n'.format(response.status_code)
+            msg += 'URL: {}'.format(response.url)
+            raise ConnectionError(msg)
+
+        response = response.json().get('data', [])
+
+        result = OrderedDict()
+        for crossing in response:
+            nb_times = crossing['nb_times']
+            notifier = crossing['notifier']
+            happn_id = notifier['id']
+
+            # For known users, update the number of times in the liked_users file
+            # This data is only available from the crossings API
+            if happn_id in self.liked_users:
+                if self.liked_users[happn_id].nb_times != nb_times:
+                    self.liked_users[happn_id].nb_times = nb_times
+                    self._update_liked_users_file()
+
+            result[happn_id] = nb_times
+        return result
+
+    def like_user(self, happn_id: str, nb_times: int = 0, output=True):
+        """
+        Like another user with the given user_id
+
+        :param happn_id: Happn user id as a string
+        """
+        if nb_times == 1:
+            if output:
+                print('User {} has only 1 crossing'.format(happn_id))
+            return
+        if happn_id in self.liked_users:
+            user = self.liked_users[happn_id]
+            if output:
+                print('User {} has already been liked'.format(user))
+            return
+
+        user = self.get_happn_user(happn_id)
+        user.nb_times = nb_times
+
+        if user.school is None or len(user.school) < 2:
+            if output:
+                print('User {} has no school defined'.format(user))
+            return
+
+        url = '{}/api/users/{}/accepted/{}'.format(self.root_url, self.me.id, happn_id)
+        response = requests.post(url, headers=self.headers)
+        if response.status_code != 200:
+            msg = 'ERROR. Failed to like another user. Status code {}'.format(response.status_code)
+            raise ConnectionError(msg)
+
+        if output:
+            print('Like: {}'.format(user))
+        self.liked_users[happn_id] = user
+        self._update_liked_users_file()
 
     def get_happn_user(self, happn_id: str) -> PAHappnUser:
         """Given a Happn user ID, return a Happn user object"""
@@ -84,7 +165,8 @@ class PAHappnBot:
             'Content-Type': 'application/json',
             'User-Agent': 'Happn/19.1.0 AndroidSDK/19'
         }
-        r = requests.get(url, headers=headers)
+        params = {'fields': ','.join(PAHappnUser.fields())}
+        r = requests.get(url, headers=headers, params=params)
 
         if r.status_code == requests.codes.ok:
             response = json.loads(r.text)
@@ -95,11 +177,62 @@ class PAHappnBot:
             msg = 'Obtaining Happn user {} fails. Status code: {}'.format(happn_id, r.status_code)
             raise ConnectionError(msg)
 
+    def analyze_liked_users(self):
+        fields_to_analyze = ['school', 'age']
+        for field in fields_to_analyze:
+            field_count = {}
+            for user in self.liked_users.values():
+                field_value = getattr(user, field)
+                if field_value in field_count:
+                    field_count[field_value] += 1
+                else:
+                    field_count[field_value] = 1
+            print()
+            print('** {} **'.format(field))
+            pprint(sorted(field_count.items(), key=operator.itemgetter(1)))
+
     def _read_secrets_file(self):
         secrets_file = self._get_secrets_file_name()
-        with open(secrets_file) as f:
-            secrets = json.loads(f.read())
-        return secrets
+        if os.path.isfile(secrets_file):
+            with open(secrets_file, 'r') as f:
+                secrets = json.load(f)
+            return secrets
+        return {}
+
+    def _read_liked_users_file(self) -> dict:
+        liked_users_file = self._get_liked_users_file_name()
+        if not os.path.isfile(liked_users_file):
+            return OrderedDict()
+
+        with open(liked_users_file, 'r') as f:
+            liked_users_list = json.load(f)
+
+        liked_users_dict = OrderedDict()
+        for liked_user in liked_users_list:
+            happn_id = liked_user['id']
+            happn_user = PAHappnUser(liked_user)
+            liked_users_dict[happn_id] = happn_user
+
+        return liked_users_dict
+
+    def _update_liked_users_file(self):
+        liked_users_file = self._get_liked_users_file_name()
+        with open(liked_users_file, 'w') as f:
+            liked_users = [user.__dict__ for user in self.liked_users.values()]
+            liked_users = sorted(liked_users, key=lambda k: k['id'])
+            json.dump(liked_users, f, indent=4)
+
+    @staticmethod
+    def get_facebook_auth_token_url():
+        url = 'https://www.facebook.com/v2.6/dialog/oauth'
+        params = {
+            'api_key': '247294518656661',  # Happn's App ID
+            'redirect_uri': 'https://www.happn.fr',  # Happn's whitelisted redirect URI
+            'response_type': 'token',
+            'scope': 'email,public_profile'
+        }
+        response = requests.get(url, params)
+        return response.url
 
     @staticmethod
     def _get_json_dir():
@@ -107,10 +240,21 @@ class PAHappnBot:
         json_dir = os.path.join(current_dir, '..', 'json')
         return json_dir
 
-    def _get_secrets_file_name(self):
+    @staticmethod
+    def _get_secrets_file_name():
         secrets_file = 'secrets.json'
-        return os.path.join(self._get_json_dir(), secrets_file)
+        return os.path.join(PAHappnBot._get_json_dir(), secrets_file)
+
+    @staticmethod
+    def _get_liked_users_file_name():
+        liked_users_file = 'liked_users.json'
+        return os.path.join(PAHappnBot._get_json_dir(), liked_users_file)
+
 
 if __name__ == '__main__':
+    print('Visit this URL to retrieve your Facebook auth token:\n{}\n'.format(
+        PAHappnBot.get_facebook_auth_token_url()))
+
     happn_bot = PAHappnBot()
     happn_bot.run_happn_bot()
+    happn_bot.analyze_liked_users()
