@@ -27,6 +27,10 @@ import requests
 
 
 class PAHappnBot:
+    ACTION_NO_ACTION = 0
+    ACTION_LIKE = 1
+    ACTION_DISLIKE = 2
+
     def __init__(self):
         self.secrets = self._read_secrets_file()
         self.liked_users = self._read_liked_users_file()
@@ -42,9 +46,19 @@ class PAHappnBot:
 
     def run_happn_bot(self):
         crossings = self.get_crossings(limit=250)
-        for happn_id, nb_times in crossings.items():
-            self.like_user(happn_id, nb_times)
+        nr_liked = nr_disliked = nr_no_action = 0
+        for index, (happn_id, nb_times) in enumerate(crossings.items()):
+            action = self.determine_action(happn_id, nb_times, index + 1)
+            if action == self.ACTION_LIKE:
+                self.like_user(happn_id)
+                nr_liked +=1
+            elif action == self.ACTION_DISLIKE:
+                self.dislike_user(happn_id)
+                nr_disliked += 1
+            elif action == self.ACTION_NO_ACTION:
+                nr_no_action += 1
         print('Processed {} possible dates'.format(len(crossings)))
+        print('Summary: {} liked, {} disliked, {} no action'.format(nr_liked, nr_disliked, nr_no_action))
 
     def log_in(self):
         """Use the Facebook oAuth token to retrieve a Happn oAuth token"""
@@ -78,7 +92,7 @@ class PAHappnBot:
             else:
                 welcome_message = 'Welcome back'
             print("Logged in as Happn user with ID {happn_id}.".format(happn_id=self.me.id))
-            print("{welcome_message}, {display_name}!".format(
+            print("{welcome_message}, {display_name}!\n".format(
                 welcome_message=welcome_message, display_name=self.me.display_name))
         else:
             msg = 'Obtaining oAuth token fails. Status code: {}'.format(r.status_code)
@@ -88,6 +102,11 @@ class PAHappnBot:
         """
         Return all crossings as a list of Happn ids
         """
+        if limit is None:
+            print('Retrieving crossings...')
+        else:
+            print('Retrieving {} crossings...'.format(limit))
+
         url = '{}/api/users/{}/crossings/'.format(self.root_url, self.me.id)
 
         fields = ['nb_times', 'notifier']
@@ -120,42 +139,68 @@ class PAHappnBot:
                     self._update_liked_users_file()
 
             result[happn_id] = nb_times
+
+        print('Retrieved {} crossings'.format(len(result)))
+
         return result
 
-    def like_user(self, happn_id: str, nb_times: int = 0, output=True):
+    def determine_action(self, happn_id: str, nb_times: int = 0, index=None, output=True):
+        index_string = ''
+        if index is not None:
+            index_string = '{} - '.format(index)
+
+        if nb_times == 1:
+            if output:
+                print('{}NO ACTION: User {} has only 1 crossing'.format(index_string, happn_id))
+            return self.ACTION_NO_ACTION
+        if happn_id in self.liked_users:
+            user = self.liked_users[happn_id]
+            if output:
+                print('{}NO ACTION: User {} has already been liked'.format(index_string, user))
+            return self.ACTION_NO_ACTION
+
+        user = self.get_happn_user(happn_id)
+        if user.school is None or len(user.school) < 2:
+            if output:
+                print('{}DISLIKE: User {} has no school defined'.format(index_string, user))
+            if happn_id in self.liked_users:
+                # It could be that the user was already liked before.
+                # We remove the user from the liked_users list
+                del self.liked_users[happn_id]
+                self._update_liked_users_file()
+            return self.ACTION_DISLIKE
+        else:
+            if output:
+                print('{}LIKE: User {}'.format(index_string, user))
+            user.nb_times = nb_times
+            self.liked_users[happn_id] = user
+            self._update_liked_users_file()
+            return self.ACTION_LIKE
+
+    def like_user(self, happn_id: str):
         """
         Like another user with the given user_id
 
         :param happn_id: Happn user id as a string
         """
-        if nb_times == 1:
-            if output:
-                print('User {} has only 1 crossing'.format(happn_id))
-            return
-        if happn_id in self.liked_users:
-            user = self.liked_users[happn_id]
-            if output:
-                print('User {} has already been liked'.format(user))
-            return
-
-        user = self.get_happn_user(happn_id)
-        user.nb_times = nb_times
-
-        if user.school is None or len(user.school) < 2:
-            if output:
-                print('User {} has no school defined'.format(user))
-            return
-
         url = '{}/api/users/{}/accepted/{}'.format(self.root_url, self.me.id, happn_id)
         response = requests.post(url, headers=self.headers)
         if response.status_code != 200:
             msg = 'ERROR. Failed to like another user. Status code {}'.format(response.status_code)
             raise ConnectionError(msg)
 
-        if output:
-            print('Like: {}'.format(user))
-        self.liked_users[happn_id] = user
-        self._update_liked_users_file()
+    def dislike_user(self, happn_id: str):
+        """
+        Dislike another user with the given user_id
+
+        :param happn_id: Happn user id as a string
+        """
+        url = '{}/api/users/{}/rejected/{}'.format(self.root_url, self.me.id, happn_id)
+        response = requests.post(url, headers=self.headers)
+        if response.status_code != 200:
+            msg = 'ERROR. Failed to dislike another user. Status code {}'.format(
+                response.status_code)
+            raise ConnectionError(msg)
 
     def get_happn_user(self, happn_id: str) -> PAHappnUser:
         """Given a Happn user ID, return a Happn user object"""
@@ -178,7 +223,7 @@ class PAHappnBot:
             raise ConnectionError(msg)
 
     def analyze_liked_users(self):
-        fields_to_analyze = ['school', 'age', 'nb_times', 'display_name']
+        fields_to_analyze = ['school', 'age', 'nb_times', 'display_name', 'gender']
         for field in fields_to_analyze:
             field_count = {}
             for user in self.liked_users.values():
@@ -189,7 +234,7 @@ class PAHappnBot:
                     field_count[field_value] = 1
             print()
             print('** {} **'.format(field))
-            pprint(sorted(field_count.items(), key=operator.itemgetter(0)))
+            pprint(sorted(field_count.items(), key=operator.itemgetter(1)))
 
     def _read_secrets_file(self):
         secrets_file = self._get_secrets_file_name()
@@ -206,6 +251,7 @@ class PAHappnBot:
 
         with open(liked_users_file, 'r') as f:
             liked_users_list = json.load(f)
+        print('You have liked {} users so far with PAHappnBot'.format(len(liked_users_list)))
 
         liked_users_dict = OrderedDict()
         for liked_user in liked_users_list:
@@ -257,4 +303,4 @@ if __name__ == '__main__':
 
     happn_bot = PAHappnBot()
     happn_bot.run_happn_bot()
-    happn_bot.analyze_liked_users()
+    # happn_bot.analyze_liked_users()
